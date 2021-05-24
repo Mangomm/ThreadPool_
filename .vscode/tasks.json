@@ -1,0 +1,15 @@
+//使用shell脚本加cmake代替vscode的tasks内容编译
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "test", //任务名称 
+            "type": "shell", //运行task的平台，一般是shell
+            "command": "make", 
+            "group": {
+                "kind": "build", //设置为build组                      
+                "isDefault": true
+            }
+        }
+    ]
+}

@@ -1,0 +1,22 @@
+//本文一般需要改编译的命令compileCommands,和只能检索头文件的includePath路径.
+//includePath是你其它文件能否被检测的重要字段.
+//例如"spdlog/spdlog.h"头文件,若不包含/home/tyy/spdlog/include,则显示红色错误
+
+//注意：路径的出错很多时候与我们vscode打开时不是项目所在路径相关
+
+{
+    "configurations": [
+        {
+            "name":"gdb",//或者MinGW64(WIndows编译器)
+            "intelliSenseMode":"gcc-x64",
+            "compileCommands": "/usr/bin/g++",  //此文件一般只需改这里,g++,gcc,gdb都可以
+            "includePath": [                    //添加自己项目目录的对应头文件路径,让vscode智能检索,但不是编译的包含头文件,两者不一样
+                "/usr/local/include/",
+                "/usr/include/"
+            ],
+            //"cStandard": "c11",
+            "cppStandard": "c++11"
+        }
+    ],
+    "version": 4
+}
