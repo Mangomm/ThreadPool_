@@ -12,7 +12,10 @@ namespace HCM_NAMESPACE
     CThreadPool::CThreadPool(){}
     CThreadPool::~CThreadPool(){}
 
-    //后面可考虑写成labmda表达式，ok.后续需要添加管理线程相关的代码
+
+    void *adjust_thread(void *threadpool);
+
+    //后面可考虑写成labmda表达式，完全ok
     void *threadpool_thread(void *threadpool)
     {
         if(NULL == threadpool){
@@ -30,6 +33,21 @@ namespace HCM_NAMESPACE
             {
                 printf("thread 0x%x is waiting\n", (unsigned int)pthread_self());
                 pthread_cond_wait(&(pool->m_queue_not_empty), &(pool->m_lock));
+
+                /*清除指定数目的空闲线程，如果要结束的线程个数大于0，结束线程*/
+                if (pool->m_wait_exit_thr_num > 0) {
+                    pool->m_wait_exit_thr_num--;
+
+                    /*如果线程池里线程个数大于最小值时可以结束当前线程，否则没有必要再退出*/
+                    if (pool->m_live_thr_num > pool->m_min_thr_num) {
+                        printf("thread 0x%x is exiting\n", (unsigned int)pthread_self());
+                        pool->m_live_thr_num--;
+                        pthread_mutex_unlock(&(pool->m_lock));
+                        pthread_exit(NULL);/*这里通过调整线程退出的线程，调用pthread_exit后未调用join回收，长时间运行可能会浪费资源(这里可以先忽略)，
+                                               可以参考C++11写的，通过一个垃圾队列进行处理.这是存在的需要优化的问题.*/
+                    }
+                }
+
             }
 
             //到这里可能是任务不为空或者线程池被关闭
@@ -38,8 +56,8 @@ namespace HCM_NAMESPACE
             if(pool->m_shutdown == true){
                 pthread_mutex_unlock(&(pool->m_lock));
                 printf("thread 0x%x is exiting\n", (unsigned int)pthread_self());
-                pthread_exit(NULL);     /* 线程自行结束,注意pthread_exit退出的与return一样，仍需调用join回收资源.这里未添加调整线程也能被回收，
-                                            因为退出时m_live_thr_num没有减减，所以destory也可以join */
+                pthread_exit(NULL);     /* 线程自行结束,注意pthread_exit退出的与return一样，仍需调用join回收资源.这里m_shutdown=true退出的都能被回收，是
+                                            因为退出时我使用m_max_thr_nums回收，而上面因调整线程退出的，并且tid被覆盖了的就无法被完整回收了 */
             }
 
             //2 否则执行任务
@@ -76,7 +94,7 @@ namespace HCM_NAMESPACE
         pthread_exit(NULL);//可以不要，因为上面没有break。但存在意外退出while，所以最好回收
     }
 
-    //ok，后续需要添加管理线程相关的代码
+    //完全ok
     bool CThreadPool::threadpool_create(int min_thr_num, int max_thr_num, int queue_max_size)
     {
         if (min_thr_num <= 0
@@ -100,6 +118,7 @@ namespace HCM_NAMESPACE
             m_queue_max_size = queue_max_size;
 
             m_shutdown = false;
+            m_wait_exit_thr_num = 0;                    /* 这个也可以不初始化，只在调整线程赋值即可. */
 
             m_task_queue = NULL;
             m_task_queue = (threadpool_task_t *)new threadpool_task_t[queue_max_size]();  /* 后面加()代表初始化自动赋0，这样可以不调用memset */
@@ -132,6 +151,7 @@ namespace HCM_NAMESPACE
                 pthread_create(&m_threads[i], NULL, threadpool_thread, (void*)this);
                 printf("start thread 0x%x...\n", (unsigned int)m_threads[i]);
             }
+            pthread_create(&m_adjust_tid, NULL, adjust_thread, (void *)this);/* 启动管理者线程 */
             
             return true;
         }while(0);
@@ -141,7 +161,7 @@ namespace HCM_NAMESPACE
         return false;
     }
 
-    //ok,可以无需再处理
+    //完全ok
     int CThreadPool::threadpool_add(void*(*function)(void *arg), void *arg)
     {
         pthread_mutex_lock(&m_lock);
@@ -176,7 +196,7 @@ namespace HCM_NAMESPACE
         return 0;
     }
 
-    //ok，后续需要添加调整线程的代码
+    //完全ok
     int CThreadPool::threadpool_destroy()
     {
         if(m_shutdown)
@@ -186,23 +206,104 @@ namespace HCM_NAMESPACE
 
         m_shutdown = true;
 
+        //回收相关线程
+        /*1 先回收管理线程*/
+        pthread_join(m_adjust_tid, NULL);
+
+        /*2 回收工作线程*/
         int i;
-        for (i = 0; i < m_live_thr_num; i++) {
+        for (i = 0; i < m_max_thr_num; i++) {
             /*通知所有的空闲线程,避免仍有运行的线程无法得到通知而阻塞*/
             pthread_cond_broadcast(&m_queue_not_empty);
         }
-        for (i = 0; i < m_live_thr_num; i++) {
-            /*回收正在运行的线程.注意：即使调用了pthread_exit退出，也算正在运行，因为m_live_thr_num并未减1.这
-              样才能回收掉子进程残留的资源.pthread_exit与return退出的线程均需用join回收资源.
+        for (i = 0; i < m_max_thr_num; i++) {
+            /*
+                回收正在运行的线程.注意：pthread_exit与return退出的线程均需用join回收资源.
+                使用m_max_thr_num而不是m_live_num是因为线程数组中的tid不一定是顺序存储的，
+                所以join时可能没回收完全.不过写m_live_num影响也不大，因为调用threadpool_destroy的地方大多是程序结尾.
             */
             pthread_join(m_threads[i], NULL);
         }
+
+        /*3 回收相关内存*/
         threadpool_free();
 
         return 0;
     }
 
-    //ok,与调整线程无关
+    //完全ok
+    void *adjust_thread(void *threadpool)
+    {
+        if(NULL == threadpool){
+            std::cout<<"threadpool is null in adjust_thread"<<std::endl;
+            return (void*)-1;
+        }
+
+        int i;
+        CThreadPool *pool = (CThreadPool *)threadpool;
+
+        while (pool->m_shutdown == false) 
+        {
+            sleep(DEFAULT_TIME);                                      /*定时 对线程池管理*/
+
+            pthread_mutex_lock(&(pool->m_lock));
+            int queue_size = pool->m_queue_size;                      /* 关注 任务数 */
+            int live_thr_num = pool->m_live_thr_num;                  /* 存活 线程数. 这两个变量实际上是参考作用，实际判断时必须使用成员变量，因为
+                                                                        这里释放锁后, 工作线程threadpool_thread被唤醒再拿到锁可能存在部分线程结束而m_live_thr_num--，
+                                                                        导致成员变量与该变量值不一样 */
+            pthread_mutex_unlock(&(pool->m_lock));
+
+            pthread_mutex_lock(&(pool->m_thread_counter));
+            int busy_thr_num = pool->m_busy_thr_num;                  /* 忙着的线程数 */
+            pthread_mutex_unlock(&(pool->m_thread_counter));
+
+            /* 创建新线程 算法： 任务数大于最小线程池任务个数(即任务数大于10个), 且存活的线程数少于最大线程个数时 如：30>=10 && 40<100*/
+            if (queue_size >= MIN_WAIT_TASK_NUM && live_thr_num < pool->m_max_thr_num) {
+                pthread_mutex_lock(&(pool->m_lock));  
+                int add = 0;
+
+                /*
+                    一次增加 DEFAULT_THREAD 个线程.
+                    第一个条件：i < pool->m_max_thr_num：程序最大可以创建的线程数,它的主要主要是让i不断去判断线程数组m_threads，寻找空的元素去创建线程。
+                    后两个条件：add < DEFAULT_THREAD_VARY && pool->m_live_thr_num < pool->m_max_thr_num 代表一次创建10个但必须低于m_max_thr_num才能创建
+                    上面三个条件可以看到，范围依次缩小.
+                    但是要注意：for中的循环条件最好是m_live_thr_num，不能用live_thr_num，因为live_thr_num的值不一定准确(比实际值大，因为只存在m_live_thr_num--,++在本for循环中)，
+                    而上面的if可以使用，因为只是初步判断能创建线程，具体创建多少个还得用m_live_thr_num.
+                */
+                for (i = 0; i < pool->m_max_thr_num && add < DEFAULT_THREAD_VARY && pool->m_live_thr_num < pool->m_max_thr_num; i++) {
+                    if (pool->m_threads[i] == 0 || pool->is_thread_alive(pool->m_threads[i]) == false) {
+                        pthread_create(&(pool->m_threads[i]), NULL, threadpool_thread, (void *)pool);
+                        add++;
+                        pool->m_live_thr_num++;
+                    }
+                }
+
+                pthread_mutex_unlock(&(pool->m_lock));
+            }
+
+            /* 
+                销毁多余的空闲线程 算法：忙线程X2 小于 存活的线程数 且 存活的线程数 大于 最小线程数时.
+                例，存活的线程=30，而忙的线程12，那么还剩18个是多余的，可以退出.乘以2是防止后续添加过多任务又要重新创建线程.
+            */
+            if ((busy_thr_num * 2) < live_thr_num  &&  live_thr_num > pool->m_min_thr_num) {
+
+                /* 一次销毁DEFAULT_THREAD个线程, 随机10個即可 */
+                pthread_mutex_lock(&(pool->m_lock));
+                pool->m_wait_exit_thr_num = DEFAULT_THREAD_VARY;      /* 要销毁的线程数 设置为10 */
+                pthread_mutex_unlock(&(pool->m_lock));
+
+                for (i = 0; i < DEFAULT_THREAD_VARY; i++) {
+                    /* 通知处在空闲状态的线程, 他们会自行终止*/
+                    pthread_cond_signal(&(pool->m_queue_not_empty));
+                }
+            }
+        }
+
+        return NULL;
+    }
+
+
+    //ok,与调整线程无关.释放锁，条件变量和相关new出来的内存
     int CThreadPool::threadpool_free()
     {
         if (m_task_queue) {

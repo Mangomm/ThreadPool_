@@ -3,6 +3,10 @@
 
 #include <mutex>
 
+#define DEFAULT_TIME 10                 /*10s检测一次*/
+#define MIN_WAIT_TASK_NUM 10			/* 如果queue_size > MIN_WAIT_TASK_NUM 添加新的线程到线程池 */
+#define DEFAULT_THREAD_VARY 10          /* 每次创建和销毁线程的个数 */
+
 namespace HCM_NAMESPACE
 {
     typedef struct {
@@ -20,7 +24,6 @@ namespace HCM_NAMESPACE
             bool threadpool_create(int min_thr_num, int max_thr_num, int queue_max_size);
             int threadpool_add(void*(*function)(void *arg), void *arg);
             int threadpool_destroy();
-            
 
             int threadpool_all_threadnum();
             int threadpool_busy_threadnum();
@@ -40,8 +43,10 @@ namespace HCM_NAMESPACE
             int m_max_thr_num;                    /* 最大线程数 */
             int m_live_thr_num;                   /* 当前存活线程个数 */
             int m_busy_thr_num;                   /* 忙状态线程个数 */
+            int m_wait_exit_thr_num;              /* 要销毁的线程个数 */
 
             pthread_t *m_threads;                 /* 存放线程池中每个线程的tid。数组 */
+            pthread_t m_adjust_tid;               /* 存管理线程tid */ 
             threadpool_task_t *m_task_queue;      /* 任务队列 */
 
             int m_queue_front;                    /* task_queue队头下标 */
@@ -50,7 +55,6 @@ namespace HCM_NAMESPACE
             int m_queue_max_size;                 /* task_queue队列可容纳任务数上限 */
 
             int m_shutdown;                       /* 标志位，线程池使用状态，true代表将要关闭线程池，false代表不关 */
-
     };
 }
 

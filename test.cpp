@@ -3,10 +3,19 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
 #include "ThreadPool.h"
 
 using namespace std;
 using namespace HCM_NAMESPACE;
+
+bool bExit = 0;
+
+void signal_ctrlc(int sig)
+{
+//	std::cout<<"get signal:"<<sig<<std::endl;
+	bExit = 1;
+}
 
 //测试未初始化的条件变量直接被销毁的结果：
 //正常，即使pthread_cond_t是未初始化,程序也不会崩溃。
@@ -38,6 +47,18 @@ void test02()
 
 }
 
+//测试回收一个不存在的线程.
+//结果：没问题。因为destory时，在m_threads数组中，存活的线程tid并不一定连续排列，当第一次创建满线程时，m_threads中没有0了，只能依靠alive去判断是否能创建线程，
+//这样就存在中间和末尾的线程可能是不活的，如果只按照m_live_nums去回收，那么最后的部分线程就无法回收.所以需要遍历m_max_thr_num。
+void test03()
+{
+	pthread_t tid = 0;
+
+	pthread_join(tid, NULL);
+
+	std::cout << "hh ok " << std::endl;
+}
+
 /* 线程池中的线程，模拟处理业务 */
 void *process(void *arg)
 {
@@ -53,8 +74,10 @@ int main(){
     CThreadPool pool;													/*在C++使用时，一般作为全局对象放
 																		  在global.h声明，然后在main函数中定义*/
 
+	signal(SIGINT, signal_ctrlc);
+
 	//1 先创建线程池
-	pool.threadpool_create(15, 15, 100);								/*创建线程池*/
+	pool.threadpool_create(3, 15, 100);								/*创建线程池*/
 	printf("pool inited\n");
 	sleep(2);
 
@@ -73,22 +96,35 @@ Task:
 	}
 
 	printf("添加完一次任务,任务数=%d, 即0 ~ %d\n", r, r - 1);
-    sleep(5);
-	goto Task;//模拟不断往线程池添加任务,若想测试threadpool_destroy，可以注释掉
 
+	if(bExit){
+		goto EXIT;
+	}	
+    /*sleep(2);
+	goto Task;//模拟线程池一直有任务.测试半个小时左右，稳定且数据正确,若想测试threadpool_destroy，可以注释掉*/
 
+	sleep(15);
+	goto Task;//模拟线程池任务为空或者不为空的情况(因为睡15s后任务基本执行完，并基本可以赶上管理线程的10s一次定时检测).更加方便测试管理线程的代码.测试半个小时左右，稳定且数据正确*/
+
+EXIT:
 	int busyNum = pool.threadpool_busy_threadnum();
 	std::cout << "BusyNum = " << busyNum << std::endl;
 	int allThrNum = pool.threadpool_all_threadnum();
 	std::cout << "allThrNum = " << allThrNum << std::endl;
 
 	//3 等子线程完成任务	    
-    sleep(10);
+    sleep(5);
 
 	std::cout << "main sleep ok " << std::endl;
 
 	//4 销毁线程池
 	pool.threadpool_destroy();
+
+	while(1)
+	{
+		printf("please see Virt in top.\n");//回收线程后，测试查看top命令的虚拟内存的大小.
+		sleep(3);
+	};
 
 	std::cout << "main end " << std::endl;
 
