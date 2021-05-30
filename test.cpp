@@ -77,9 +77,14 @@ int main(){
 	signal(SIGINT, signal_ctrlc);
 
 	//1 先创建线程池
-	pool.threadpool_create(3, 15, 100);								/*创建线程池*/
-	printf("pool inited\n");
-	sleep(2);
+	bool ret = pool.threadpool_create(3, 15, 100);								/*创建线程池*/
+	if(ret == false)
+	{
+		printf("pool inited failed\n");
+		return -1;
+	}
+	printf("pool inited Ok\n");
+	sleep(1);
 
 
 	//2 模拟客户端请求的任务
@@ -101,10 +106,10 @@ Task:
 		goto EXIT;
 	}	
     /*sleep(2);
-	goto Task;//模拟线程池一直有任务.测试半个小时左右，稳定且数据正确,若想测试threadpool_destroy，可以注释掉*/
+	goto Task;//模拟线程池一直有任务.测试2个小时，稳定且数据正确,若想测试threadpool_destroy，可以注释掉*/
 
 	sleep(15);
-	goto Task;//模拟线程池任务为空或者不为空的情况(因为睡15s后任务基本执行完，并基本可以赶上管理线程的10s一次定时检测).更加方便测试管理线程的代码.测试半个小时左右，稳定且数据正确*/
+	goto Task;//模拟线程池任务为空或者不为空的情况(因为睡15s后任务基本执行完，并基本可以赶上管理线程的10s一次定时检测).更加方便测试管理线程的代码.测试2个小时左右，稳定且数据正确，虚拟内存也不再增加。*/
 
 EXIT:
 	int busyNum = pool.threadpool_busy_threadnum();

@@ -40,11 +40,28 @@ namespace HCM_NAMESPACE
 
                     /*如果线程池里线程个数大于最小值时可以结束当前线程，否则没有必要再退出*/
                     if (pool->m_live_thr_num > pool->m_min_thr_num) {
-                        printf("thread 0x%x is exiting\n", (unsigned int)pthread_self());
+                        ThreadItem *item = NULL;
+                        auto tid = pthread_self();     
+                        for(auto it = pool->m_threads.begin(); it != pool->m_threads.end(); it++)
+                        {
+                            if(tid == (*it)->_Handle)
+                            {
+                                item = (*it);                       /* 注意保存删除前的，而不是删除后的*it */
+                                it = pool->m_threads.erase(it);
+                                break;
+                            }
+                        }
+                        pthread_mutex_lock(&(pool->m_gar));
+                        if(item){                                    /* 不push空的线程结构，防止段错误，虽然上面for必定进入，但需要以防万一 */
+                            pool->m_garbage.emplace_back(item);      /* 记录因调整线程而退出的线程，用于join回收 */
+                        }
+                        pthread_mutex_unlock(&(pool->m_gar));
+
+                        printf("line :%d, thread 0x%x is exiting\n", __LINE__, (unsigned int)tid);
                         pool->m_live_thr_num--;
                         pthread_mutex_unlock(&(pool->m_lock));
-                        pthread_exit(NULL);/*这里通过调整线程退出的线程，调用pthread_exit后未调用join回收，长时间运行可能会浪费资源(这里可以先忽略)，
-                                               可以参考C++11写的，通过一个垃圾队列进行处理.这是存在的需要优化的问题.*/
+                        pthread_exit(NULL);/*pthread_exit与return一样，必须调用join回收，否则长时间运行会浪费资源，频繁
+                                              的创建退出线程现象是虚拟内存变得非常大，这就是上面添加垃圾队列的原因*/
                     }
                 }
 
@@ -55,9 +72,9 @@ namespace HCM_NAMESPACE
             //1 若线程池被关闭，则退出该线程.这里是线程统一退出的接口,有多少个exiting就有多少个线程退出
             if(pool->m_shutdown == true){
                 pthread_mutex_unlock(&(pool->m_lock));
-                printf("thread 0x%x is exiting\n", (unsigned int)pthread_self());
-                pthread_exit(NULL);     /* 线程自行结束,注意pthread_exit退出的与return一样，仍需调用join回收资源.这里m_shutdown=true退出的都能被回收，是
-                                            因为退出时我使用m_max_thr_nums回收，而上面因调整线程退出的，并且tid被覆盖了的就无法被完整回收了 */
+                printf("line :%d, thread 0x%x is exiting\n", __LINE__, (unsigned int)pthread_self());
+                pthread_exit(NULL);     /* 线程自行结束,注意pthread_exit退出的与return一样，仍需调用join回收资源.当m_shutdown=true时，现有的线程退出可能部分因调整线程
+                                            会进入垃圾队列，但是都能被回收，因为对这两队列都join了(重复join不会报错) */
             }
 
             //2 否则执行任务
@@ -104,6 +121,7 @@ namespace HCM_NAMESPACE
             return false;
         }
 
+        bool isInitMC = false;                          /* 是否已经初始化锁和条件变量，作用是防止在free时使用未初始化的锁和条件变量 */
         do
         {
             m_min_thr_num = min_thr_num;
@@ -127,18 +145,11 @@ namespace HCM_NAMESPACE
                 break;
             }
             //memset(m_task_queue, 0x00, sizeof(m_task_queue) * queue_max_size);
-
-            m_threads = NULL;
-            m_threads = (pthread_t *)new pthread_t[max_thr_num]();
-            if(NULL == m_threads){
-                std::cout<<"new m_threads failed."<<std::endl;
-                break;
-            }
-            //memset(m_threads, 0x00, sizeof(pthread_t) * max_thr_num);
             
             /* 初始化互斥琐、条件变量 */
             if (pthread_mutex_init(&(m_lock), NULL) != 0
                 || pthread_mutex_init(&(m_thread_counter), NULL) != 0
+                || pthread_mutex_init(&m_gar, NULL) != 0
                 || pthread_cond_init(&(m_queue_not_empty), NULL) != 0
                 || pthread_cond_init(&(m_queue_not_full), NULL) != 0)
             {
@@ -146,17 +157,35 @@ namespace HCM_NAMESPACE
                 break;
             }
 
+            isInitMC = true;
+
             int i = 0;
-            for(i = 0; i < min_thr_num; i++){
-                pthread_create(&m_threads[i], NULL, threadpool_thread, (void*)this);
-                printf("start thread 0x%x...\n", (unsigned int)m_threads[i]);
+            bool flag = false;
+            ThreadItem *item = NULL;
+            for(i = 0; i < min_thr_num; i++)
+            {
+                item = new ThreadItem(this);
+                if(NULL == item){
+                    std::cout<<"create item failed, i :"<<i<<std::endl;
+                    flag = true;
+                    break;
+                }
+                m_threads.emplace_back(item);//最好先push在create。
+
+                pthread_create(&(item->_Handle), NULL, threadpool_thread, (void*)this);
+                printf("start thread 0x%x...\n", (unsigned int)item->_Handle);
             }
-            pthread_create(&m_adjust_tid, NULL, adjust_thread, (void *)this);/* 启动管理者线程 */
+            if(flag){
+                break;//有一个new失败就直接回收资源并退出。不再创建管理线程
+            }
+
+            pthread_create(&(m_adjust._Handle), NULL, adjust_thread, (void *)this);/* 启动管理者线程 */
             
             return true;
         }while(0);
 
-        threadpool_free();
+        /* 回收create内部开辟过的资源 */
+        threadpool_free_create(isInitMC);
 
         return false;
     }
@@ -208,7 +237,7 @@ namespace HCM_NAMESPACE
 
         //回收相关线程
         /*1 先回收管理线程*/
-        pthread_join(m_adjust_tid, NULL);
+        pthread_join(m_adjust._Handle, NULL);
 
         /*2 回收工作线程*/
         int i;
@@ -216,17 +245,45 @@ namespace HCM_NAMESPACE
             /*通知所有的空闲线程,避免仍有运行的线程无法得到通知而阻塞*/
             pthread_cond_broadcast(&m_queue_not_empty);
         }
-        for (i = 0; i < m_max_thr_num; i++) {
-            /*
-                回收正在运行的线程.注意：pthread_exit与return退出的线程均需用join回收资源.
-                使用m_max_thr_num而不是m_live_num是因为线程数组中的tid不一定是顺序存储的，
-                所以join时可能没回收完全.不过写m_live_num影响也不大，因为调用threadpool_destroy的地方大多是程序结尾.
-            */
-            pthread_join(m_threads[i], NULL);
+        for(auto &item : m_threads)
+        {
+            if(NULL != item)
+            {
+                pthread_join(item->_Handle, NULL);
+                delete item;
+                item = NULL;
+            }
         }
+        /*因为最后可能存在部分线程还会进入垃圾队列，所以需要释放，即垃圾队列可能存在与数组线程一样的tid，但是join两次不会出问题，并且item是被置空了无法再次使用*/
+        for(auto &item : m_garbage)
+        {
+            if(NULL != item)
+            {
+                pthread_join(item->_Handle, NULL);
+                delete item;
+                item = NULL;
+            }
+        }
+        m_threads.clear();
+        m_garbage.clear();
 
-        /*3 回收相关内存*/
-        threadpool_free();
+        /*3 最后回收内存锁条件变量等资源*/
+        if (m_task_queue) {
+            delete [] m_task_queue;
+            m_task_queue = NULL;
+
+            pthread_mutex_lock(&m_lock);//C语言必须先上锁再destory锁，否则别人(threadpool_thread)还再使用的话就会出现问题
+            pthread_mutex_destroy(&m_lock);
+            pthread_mutex_lock(&m_thread_counter);
+            pthread_mutex_destroy(&m_thread_counter);
+            pthread_mutex_lock(&m_gar);
+            pthread_mutex_destroy(&m_gar);
+
+            //即使没有调用pthread_cond_init也不会崩溃，正常现象.放进if(m_task_queue)中或者外面处理也行
+            //但这里放if里更好，因为m_task_queue为空，创建时必定不会初始化到锁和条件变量
+            pthread_cond_destroy(&m_queue_not_empty);
+            pthread_cond_destroy(&m_queue_not_full);
+        }
 
         return 0;
     }
@@ -264,18 +321,22 @@ namespace HCM_NAMESPACE
 
                 /*
                     一次增加 DEFAULT_THREAD 个线程.
-                    第一个条件：i < pool->m_max_thr_num：程序最大可以创建的线程数,它的主要主要是让i不断去判断线程数组m_threads，寻找空的元素去创建线程。
-                    后两个条件：add < DEFAULT_THREAD_VARY && pool->m_live_thr_num < pool->m_max_thr_num 代表一次创建10个但必须低于m_max_thr_num才能创建
-                    上面三个条件可以看到，范围依次缩小.
+                    两个条件：add < DEFAULT_THREAD_VARY && pool->m_live_thr_num < pool->m_max_thr_num 代表一次创建10个但必须低于m_max_thr_num才能创建
                     但是要注意：for中的循环条件最好是m_live_thr_num，不能用live_thr_num，因为live_thr_num的值不一定准确(比实际值大，因为只存在m_live_thr_num--,++在本for循环中)，
                     而上面的if可以使用，因为只是初步判断能创建线程，具体创建多少个还得用m_live_thr_num.
                 */
-                for (i = 0; i < pool->m_max_thr_num && add < DEFAULT_THREAD_VARY && pool->m_live_thr_num < pool->m_max_thr_num; i++) {
-                    if (pool->m_threads[i] == 0 || pool->is_thread_alive(pool->m_threads[i]) == false) {
-                        pthread_create(&(pool->m_threads[i]), NULL, threadpool_thread, (void *)pool);
-                        add++;
-                        pool->m_live_thr_num++;
-                    }
+                ThreadItem *item = NULL;
+                for (i = 0; add < DEFAULT_THREAD_VARY && pool->m_live_thr_num < pool->m_max_thr_num; i++) {
+                    item = new ThreadItem(pool);
+                    if (item == NULL) {
+                        printf("incre thread faid, it will continue to incre.\n");
+                        continue;//若全部new失败，则增加0个线程,不push进线程数组，无需处理错误
+				    }
+                    pool->m_threads.emplace_back(item);
+
+                    pthread_create(&(item->_Handle), NULL, threadpool_thread, (void *)pool);
+                    add++;
+                    pool->m_live_thr_num++;
                 }
 
                 pthread_mutex_unlock(&(pool->m_lock));
@@ -297,31 +358,73 @@ namespace HCM_NAMESPACE
                     pthread_cond_signal(&(pool->m_queue_not_empty));
                 }
             }
+
+            /* 清理本次因空闲而结束线程内存 */
+            pthread_mutex_lock(&(pool->m_gar));
+            if(pool->m_garbage.size() > 0)
+            {
+                pthread_t tmpTid = -1;
+                for(auto it = pool->m_garbage.begin(); it != pool->m_garbage.end(); it++)
+                {
+                    if(NULL != (*it))
+                    {
+                        tmpTid = (*it)->_Handle;
+                        printf("line :%d, garbage tid :%lu\n", __LINE__, tmpTid);
+                        pthread_join(tmpTid, NULL);/*这里可能会因为join回收而降低线程池的效率，不过因为回收的都是已经退出的线程，所以非常快，不用等待线程退出才回收*/
+                        delete *it;
+                        (*it) = NULL;
+                    }
+
+                }
+                pool->m_garbage.clear();//一次清除比多次erase效率快
+            }
+            pthread_mutex_unlock(&(pool->m_gar));
+
+
         }
 
         return NULL;
     }
 
 
-    //ok,与调整线程无关.释放锁，条件变量和相关new出来的内存
-    int CThreadPool::threadpool_free()
+    /* 这个函数是单独回收crate调用失败时，已经开辟的资源， 所以无需处理管理线程。完全ok */
+    int CThreadPool::threadpool_free_create(bool isInitMC)
     {
+        if(isInitMC)/* 确保已经到底for，否则会pthread_cond_broadcast等地方会使用到未初始化的变量 */
+        {
+            /*1 优先回收线程。这里是回收由于new失败，之前已经成功new的线程 */
+            m_shutdown = true;
+            int i;
+            for (i = 0; i < m_max_thr_num; i++) {
+                /*通知所有的空闲线程退出,避免仍有运行的线程无法得到通知而阻塞*/
+                pthread_cond_broadcast(&m_queue_not_empty);
+            }
+
+            if (m_threads.size() > 0) {
+                for(auto &item : m_threads){
+                    if(NULL != item){
+                        pthread_join(item->_Handle, NULL);//回收已经创建的线程
+                        delete item;
+                        item = NULL;
+                    }
+                }
+            }
+        }
+
+        /*2 在回收队列和锁，条件变量的资源 */
         if (m_task_queue) {
             delete [] m_task_queue;
             m_task_queue = NULL;
-        }
-
-        if (m_threads) {
-            delete [] m_threads;
-            m_threads = NULL;
 
             pthread_mutex_lock(&m_lock);//C语言必须先上锁再destory锁，否则别人(threadpool_thread)还再使用的话就会出现问题
             pthread_mutex_destroy(&m_lock);
             pthread_mutex_lock(&m_thread_counter);
             pthread_mutex_destroy(&m_thread_counter);
+            pthread_mutex_lock(&m_gar);
+            pthread_mutex_destroy(&m_gar);
 
-            //即使没有调用pthread_cond_init也不会崩溃，正常现象.放进if(m_threads)中或者外面处理也行
-            //但这里放if里更好，因为m_threads为空，创建时必定不会初始化到锁和条件变量
+            //即使没有调用pthread_cond_init也不会崩溃，正常现象.放进if(m_task_queue)中或者外面处理也行
+            //但这里放if里更好，因为m_task_queue为空，创建时必定不会初始化到锁和条件变量
             pthread_cond_destroy(&m_queue_not_empty);
             pthread_cond_destroy(&m_queue_not_full);
         }
@@ -329,7 +432,7 @@ namespace HCM_NAMESPACE
         return 0;
     }
 
-    //获取线程池里存活的线程数,ok
+    //获取线程池里存活的线程数,完全ok
     int CThreadPool::threadpool_all_threadnum()
     {
         int all_threadnum = -1;
@@ -340,7 +443,7 @@ namespace HCM_NAMESPACE
         return all_threadnum;
     }
 
-    //获取忙线程数,ok
+    //获取忙线程数,完全ok
     int CThreadPool::threadpool_busy_threadnum()
     {
         int busy_threadnum = -1;
@@ -350,15 +453,38 @@ namespace HCM_NAMESPACE
         return busy_threadnum;
     }
 
-    //测试某个线程释放存活,ok
+    /*
+        测试某个线程释放存活,弃用.原因如下：
+        1）pthread_kill/pthread_tryjoin_np不安全，一旦tid是被join回收过，刚好系统又把pthread_t的内存回收，那么就会报段错误，但出现段错误的概率不是百分百
+        2）未调用pthread_create，若调用pthread_kill会报段错误，实际上原理和1一样。
+    */
     int CThreadPool::is_thread_alive(pthread_t tid)
     {
-        int kill_rc = pthread_kill(tid, 0);     //发0号信号，测试线程是否存活
-        if (kill_rc == ESRCH) {
-            return false;
+        // printf("is_thread_alive, tid :%lu\n", tid);
+        /*发0号信号，测试线程是否存活,pthread_kill不安全，一旦tid是被join回收过，刚好系统又把pthread_t的内存回收，那么就会报段错误，但出现段错误的概率不是百分百*/
+        // int kill_rc = pthread_kill(tid, 0);     
+        // if (kill_rc == ESRCH) {
+        //     printf("line=%d, tid :%lu\n", __LINE__, tid);
+        //     return false;
+        // }
+        // return true;
+
+        bool bAlive = false;
+        /*
+            pthread_tryjoin_np作用：
+            成功返回0，此时线程结束。
+            失败返回非0并且需要处理错误，当错误号为EBUSY时，线程存活，否则死忙并且为其它错误。
+        */
+        int ret = pthread_tryjoin_np(tid, NULL);
+        if(ret != 0)
+        {
+            /* Handle error */
+            if(EBUSY == ret){
+                bAlive = true;
+            }
         }
 
-        return true;
+        return bAlive;
     }
 
 }

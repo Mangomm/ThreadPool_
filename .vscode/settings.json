@@ -38,6 +38,8 @@
         "streambuf": "cpp",
         "utility": "cpp",
         "typeinfo": "cpp",
-        "thread": "cpp"
+        "thread": "cpp",
+        "condition_variable": "cpp",
+        "memory": "cpp"
     }
 }
