@@ -41,16 +41,16 @@ namespace HCM_NAMESPACE
                     /*如果线程池里线程个数大于最小值时可以结束当前线程，否则没有必要再退出*/
                     if (pool->m_live_thr_num > pool->m_min_thr_num) {
                         ThreadItem *item = NULL;
-                        auto tid = pthread_self();     
-                        for(auto it = pool->m_threads.begin(); it != pool->m_threads.end(); it++)
+                        auto tid = pthread_self();
+                        auto it = pool->m_threads.find(tid);
+                        if(it != pool->m_threads.end())
                         {
-                            if(tid == (*it)->_Handle)
-                            {
-                                item = (*it);                       /* 注意保存删除前的，而不是删除后的*it */
-                                it = pool->m_threads.erase(it);
-                                break;
-                            }
+                            item = it->second;
+                            pool->m_threads.erase(it);
+                        }else{
+                            printf("Warn, pid:%ul, ThreadItem is null.\n", (unsigned int)tid);
                         }
+
                         pthread_mutex_lock(&(pool->m_gar));
                         if(item){                                    /* 不push空的线程结构，防止段错误，虽然上面for必定进入，但需要以防万一 */
                             pool->m_garbage.emplace_back(item);      /* 记录因调整线程而退出的线程，用于join回收 */
@@ -170,16 +170,18 @@ namespace HCM_NAMESPACE
                     flag = true;
                     break;
                 }
-                m_threads.emplace_back(item);//最好先push在create。
 
                 pthread_create(&(item->_Handle), NULL, threadpool_thread, (void*)this);
+                m_threads.insert(std::make_pair(item->_Handle, item));
                 printf("start thread 0x%x...\n", (unsigned int)item->_Handle);
             }
             if(flag){
                 break;//有一个new失败就直接回收资源并退出。不再创建管理线程
             }
 
-            pthread_create(&(m_adjust._Handle), NULL, adjust_thread, (void *)this);/* 启动管理者线程 */
+            /* 启动管理者线程,不过为啥ifrunning不是false，应该在pool构造时调用成员变量的构造成0的啊，原因是默认调用默认构造而非有参构造，已优化，可看默认构造
+                而上面不会随机值是因为：new的时候调用有参构造赋值 */
+            pthread_create(&(m_adjust._Handle), NULL, adjust_thread, (void *)this);
             
             return true;
         }while(0);
@@ -245,15 +247,16 @@ namespace HCM_NAMESPACE
             /*通知所有的空闲线程,避免仍有运行的线程无法得到通知而阻塞*/
             pthread_cond_broadcast(&m_queue_not_empty);
         }
-        for(auto &item : m_threads)
+        for(auto it = m_threads.begin(); it != m_threads.end(); it++)
         {
-            if(NULL != item)
+            if(NULL != it->second)
             {
-                pthread_join(item->_Handle, NULL);
-                delete item;
-                item = NULL;
+                pthread_join(it->second->_Handle, NULL);
+                delete it->second;
+                it->second = NULL;
             }
         }
+
         /*因为最后可能存在部分线程还会进入垃圾队列，所以需要释放，即垃圾队列可能存在与数组线程一样的tid，但是join两次不会出问题，并且item是被置空了无法再次使用*/
         for(auto &item : m_garbage)
         {
@@ -332,9 +335,9 @@ namespace HCM_NAMESPACE
                         printf("incre thread faid, it will continue to incre.\n");
                         continue;//若全部new失败，则增加0个线程,不push进线程数组，无需处理错误
 				    }
-                    pool->m_threads.emplace_back(item);
-
                     pthread_create(&(item->_Handle), NULL, threadpool_thread, (void *)pool);
+                    pool->m_threads.insert(std::make_pair(item->_Handle, item));
+
                     add++;
                     pool->m_live_thr_num++;
                 }
@@ -390,7 +393,7 @@ namespace HCM_NAMESPACE
     /* 这个函数是单独回收crate调用失败时，已经开辟的资源， 所以无需处理管理线程。完全ok */
     int CThreadPool::threadpool_free_create(bool isInitMC)
     {
-        if(isInitMC)/* 确保已经到底for，否则会pthread_cond_broadcast等地方会使用到未初始化的变量 */
+        if(isInitMC)/* 确保已经到底for，否则会pthread_cond_broadcast等地方会使用到未初始化的变量，例如m_queue_not_empty */
         {
             /*1 优先回收线程。这里是回收由于new失败，之前已经成功new的线程 */
             m_shutdown = true;
@@ -401,11 +404,11 @@ namespace HCM_NAMESPACE
             }
 
             if (m_threads.size() > 0) {
-                for(auto &item : m_threads){
-                    if(NULL != item){
-                        pthread_join(item->_Handle, NULL);//回收已经创建的线程
-                        delete item;
-                        item = NULL;
+                for(auto it = m_threads.begin(); it != m_threads.end(); it++){//回收map，感觉这样更安全
+                    if(NULL != it->second){
+                        pthread_join(it->second->_Handle, NULL);//回收已经创建的线程
+                        delete it->second;
+                        it->second = NULL;
                     }
                 }
             }

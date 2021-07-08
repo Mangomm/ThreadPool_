@@ -3,6 +3,8 @@
 
 #include <mutex>
 #include <vector>
+#include <map>
+#pragma(1)                              /* 若不加，会因添加map线程数组后，导致字节不对齐的情况，现象可注释后观察threadpool_create调用前后的pool值 */
 
 #define DEFAULT_TIME 10                 /* 10s检测一次 */
 #define MIN_WAIT_TASK_NUM 10			/* 如果queue_size > MIN_WAIT_TASK_NUM 添加新的线程到线程池 */
@@ -21,7 +23,13 @@ namespace HCM_NAMESPACE
     struct ThreadItem   
     {
         //构造函数
-        ThreadItem() {}
+        ThreadItem() 
+        {
+            /* 默认构造写内容是为了：更好初始化m_adjust，原因是程序刚开始不会调用下面的有参构造，而是默认调用默认构造，导致m_adjust里的值是随机的。 */
+            _pThis = NULL;
+            _Handle = 0;
+            ifrunning = false;
+        }
         ThreadItem(CThreadPool *pthis):_pThis(pthis), _Handle(0), ifrunning(false){}                             
         //析构函数
         ~ThreadItem(){} 
@@ -51,7 +59,8 @@ namespace HCM_NAMESPACE
             pthread_mutex_t m_lock;               /* 锁住本接类，由于MyLcok类不方便随时解锁，所以还是用回pthread_mutex_t */
             pthread_mutex_t m_thread_counter;     /* 记录忙状态线程个数de琐 -- busy_thr_num */
 
-            std::vector<ThreadItem*> m_threads;   /* 线程数组，无需锁住该数组队列的锁，因为队列属于本对象，m_lock已经锁住 */
+            //std::vector<ThreadItem*> m_threads;   /* 线程数组，无需锁住该数组队列的锁，因为队列属于本对象，m_lock已经锁住 */
+            std::map<pthread_t, ThreadItem*> m_threads;
             ThreadItem m_adjust;                  /* 调整线程 */
             pthread_mutex_t m_gar;                /* 垃圾回收队列锁 */
             std::vector<ThreadItem*> m_garbage;   /* 回收由调整线程退出的线程资源. */

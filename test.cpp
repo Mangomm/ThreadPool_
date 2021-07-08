@@ -9,6 +9,7 @@
 using namespace std;
 using namespace HCM_NAMESPACE;
 
+
 bool bExit = 0;
 
 void signal_ctrlc(int sig)
@@ -105,11 +106,11 @@ Task:
 	if(bExit){
 		goto EXIT;
 	}	
-    /*sleep(2);
+    sleep(2);
 	goto Task;//模拟线程池一直有任务.测试2个小时，稳定且数据正确,若想测试threadpool_destroy，可以注释掉*/
 
-	sleep(15);
-	goto Task;//模拟线程池任务为空或者不为空的情况(因为睡15s后任务基本执行完，并基本可以赶上管理线程的10s一次定时检测).更加方便测试管理线程的代码.测试2个小时左右，稳定且数据正确，虚拟内存也不再增加。*/
+	//sleep(15);
+	//goto Task;//模拟线程池任务为空或者不为空的情况(因为睡15s后任务基本执行完，并基本可以赶上管理线程的10s一次定时检测).更加方便测试管理线程的代码.测试2个小时左右，稳定且数据正确，虚拟内存也不再增加。*/
 
 EXIT:
 	int busyNum = pool.threadpool_busy_threadnum();
